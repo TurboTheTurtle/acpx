@@ -3907,6 +3907,48 @@ test("integration: prompt exits after done while detached owner stays warm", asy
   });
 });
 
+test("integration: queue owner startup reports the underlying filesystem error", async (t) => {
+  if (process.platform === "win32" || process.getuid?.() === 0) {
+    t.skip("requires POSIX symlink semantics and an unprivileged user");
+    return;
+  }
+
+  await withTempHome(async (homeDir) => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));
+
+    try {
+      const created = await runCli(
+        [...baseAgentArgs(cwd), "--format", "json", "sessions", "new"],
+        homeDir,
+      );
+      assert.equal(created.code, 0, created.stderr);
+
+      const queueDir = path.join(homeDir, ".acpx", "queues");
+      await fs.rm(queueDir, { recursive: true, force: true });
+      await fs.symlink(path.parse(queueDir).root, queueDir, "dir");
+
+      const startedAt = Date.now();
+      const result = await runCli(
+        [...baseAgentArgs(cwd), "--format", "quiet", "prompt", "echo unreachable"],
+        homeDir,
+        { timeoutMs: 10_000 },
+      );
+      const durationMs = Date.now() - startedAt;
+
+      assert.notEqual(result.code, 0, result.stderr);
+      assert.match(result.stderr, /Session queue owner failed to start/);
+      assert.match(result.stderr, /EPERM: operation not permitted, chmod/);
+      assert.equal(
+        durationMs < 3_000,
+        true,
+        `expected the startup error before the polling timeout, got ${durationMs}ms`,
+      );
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
 test("integration: prompt --no-wait is processed by the detached queue owner", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));

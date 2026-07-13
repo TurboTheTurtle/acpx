@@ -8,7 +8,10 @@ import { resolveClaudeCodeExecutable } from "../src/acp/agent-command.js";
 import { resolveAgentSessionCwd } from "../src/acp/client-process.js";
 import { buildAgentSpawnOptions, buildSpawnCommandOptions } from "../src/acp/client.js";
 import { buildTerminalSpawnOptions } from "../src/acp/terminal-manager.js";
-import { buildQueueOwnerSpawnOptions } from "../src/cli/session/queue-owner-process.js";
+import {
+  buildQueueOwnerSpawnOptions,
+  queueOwnerExitFailure,
+} from "../src/cli/session/queue-owner-process.js";
 import {
   buildTerminalShellSpawnCommand,
   buildTerminalSpawnCommand,
@@ -239,10 +242,16 @@ test("buildQueueOwnerSpawnOptions hides Windows console windows and passes paylo
   const options = buildQueueOwnerSpawnOptions("/tmp/acpx-queue-owner/payload.json");
 
   assert.equal(options.detached, true);
-  assert.equal(options.stdio, "ignore");
+  assert.deepEqual(options.stdio, ["ignore", "ignore", "ignore", "ipc"]);
   assert.equal(options.windowsHide, true);
   assert.equal(options.env.ACPX_QUEUE_OWNER_PAYLOAD_FILE, "/tmp/acpx-queue-owner/payload.json");
   assert.equal(options.env.ACPX_QUEUE_OWNER_PAYLOAD, undefined);
+});
+
+test("queueOwnerExitFailure preserves clean lease-contention exits", () => {
+  assert.equal(queueOwnerExitFailure(0, null), undefined);
+  assert.match(queueOwnerExitFailure(1, null)?.message ?? "", /exited with code 1/);
+  assert.match(queueOwnerExitFailure(null, "SIGTERM")?.message ?? "", /signal SIGTERM/);
 });
 
 test("buildSpawnCommandOptions enables shell for .cmd/.bat on Windows", () => {

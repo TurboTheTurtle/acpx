@@ -516,17 +516,37 @@ export async function sendSession(options: SessionSendOptions): Promise<SessionS
     return queuedToOwner;
   }
 
-  spawnQueueOwnerProcess(queueOwnerRuntimeOptionsFromSend(options));
+  const startup = spawnQueueOwnerProcess(queueOwnerRuntimeOptionsFromSend(options));
 
-  for (let attempt = 0; attempt < QUEUE_OWNER_STARTUP_MAX_ATTEMPTS; attempt += 1) {
-    const queued = await submitToRunningOwner(options, waitForCompletion);
-    if (queued) {
-      return queued;
+  try {
+    for (let attempt = 0; attempt < QUEUE_OWNER_STARTUP_MAX_ATTEMPTS; attempt += 1) {
+      const failure = startup.failure();
+      if (failure) {
+        throw new Error(
+          `Session queue owner failed to start for session ${options.sessionId}: ${failure.message}`,
+          { cause: failure },
+        );
+      }
+
+      const queued = await submitToRunningOwner(options, waitForCompletion);
+      if (queued) {
+        return queued;
+      }
+      await waitMs(QUEUE_CONNECT_RETRY_MS);
     }
-    await waitMs(QUEUE_CONNECT_RETRY_MS);
-  }
 
-  throw new Error(`Session queue owner failed to start for session ${options.sessionId}`);
+    const failure = startup.failure();
+    if (failure) {
+      throw new Error(
+        `Session queue owner failed to start for session ${options.sessionId}: ${failure.message}`,
+        { cause: failure },
+      );
+    }
+
+    throw new Error(`Session queue owner failed to start for session ${options.sessionId}`);
+  } finally {
+    startup.release();
+  }
 }
 
 export type { QueueOwnerRuntimeOptions };

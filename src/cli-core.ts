@@ -22,6 +22,7 @@ import {
 } from "./cli/flags.js";
 import { createOutputFormatter, getTextErrorRemediationHints } from "./cli/output/output.js";
 import { runQueueOwnerFromEnv } from "./cli/queue/owner-env.js";
+import { reportQueueOwnerStartupFailure } from "./cli/session/queue-owner-process.js";
 import { flushPerfMetricsCapture, installPerfMetricsCapture } from "./perf-metrics-capture.js";
 import { EXIT_CODES, OUTPUT_FORMATS, type OutputFormat, type OutputPolicy } from "./types.js";
 import { getAcpxVersion } from "./version.js";
@@ -448,6 +449,7 @@ async function handleQueueOwnerCommand(argv: string[]): Promise<boolean> {
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    await reportQueueOwnerStartupFailure(message);
     process.stderr.write(`[acpx] queue owner failed: ${message}\n`);
     process.exit(EXIT_CODES.ERROR);
     return true;

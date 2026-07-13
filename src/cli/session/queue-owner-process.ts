@@ -12,6 +12,31 @@ import type {
 
 const QUEUE_OWNER_PAYLOAD_FILE_ENV = "ACPX_QUEUE_OWNER_PAYLOAD_FILE";
 const QUEUE_OWNER_PAYLOAD_ENV = "ACPX_QUEUE_OWNER_PAYLOAD";
+const QUEUE_OWNER_STARTUP_FAILURE_MESSAGE = "acpx_queue_owner_startup_failure";
+
+type QueueOwnerStartupFailureMessage = {
+  type: typeof QUEUE_OWNER_STARTUP_FAILURE_MESSAGE;
+  message: string;
+};
+
+export type QueueOwnerStartupMonitor = {
+  failure: () => Error | undefined;
+  release: () => void;
+};
+
+export function queueOwnerExitFailure(
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): Error | undefined {
+  if (code === 0 && signal === null) {
+    return undefined;
+  }
+  return new Error(
+    signal
+      ? `queue owner exited with signal ${signal} before binding its socket`
+      : `queue owner exited with code ${code ?? "unknown"} before binding its socket`,
+  );
+}
 
 export type QueueOwnerRuntimeOptions = {
   sessionId: string;
@@ -190,7 +215,7 @@ export function writeQueueOwnerPayloadFile(payload: string): string {
 
 export function buildQueueOwnerSpawnOptions(payloadFilePath: string): {
   detached: true;
-  stdio: "ignore";
+  stdio: ["ignore", "ignore", "ignore", "ipc"];
   env: NodeJS.ProcessEnv;
   windowsHide: true;
 } {
@@ -201,13 +226,59 @@ export function buildQueueOwnerSpawnOptions(payloadFilePath: string): {
   delete env[QUEUE_OWNER_PAYLOAD_ENV];
   return {
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
     env,
     windowsHide: true,
   };
 }
 
-export function spawnQueueOwnerProcess(options: QueueOwnerRuntimeOptions): void {
+function isQueueOwnerStartupFailureMessage(
+  message: unknown,
+): message is QueueOwnerStartupFailureMessage {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+  const candidate = message as Partial<QueueOwnerStartupFailureMessage>;
+  return (
+    candidate.type === QUEUE_OWNER_STARTUP_FAILURE_MESSAGE &&
+    typeof candidate.message === "string" &&
+    candidate.message.length > 0
+  );
+}
+
+export async function reportQueueOwnerStartupFailure(message: string): Promise<void> {
+  if (!process.send || !process.connected) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, 250);
+    try {
+      process.send?.(
+        {
+          type: QUEUE_OWNER_STARTUP_FAILURE_MESSAGE,
+          message,
+        } satisfies QueueOwnerStartupFailureMessage,
+        finish,
+      );
+    } catch {
+      finish();
+    }
+  });
+}
+
+export function spawnQueueOwnerProcess(
+  options: QueueOwnerRuntimeOptions,
+): QueueOwnerStartupMonitor {
   const payload = JSON.stringify(options);
   const payloadPath = writeQueueOwnerPayloadFile(payload);
   const child = spawn(
@@ -215,5 +286,32 @@ export function spawnQueueOwnerProcess(options: QueueOwnerRuntimeOptions): void 
     resolveQueueOwnerSpawnArgs(),
     buildQueueOwnerSpawnOptions(payloadPath),
   );
+  let startupFailure: Error | undefined;
+  child.on("message", (message: unknown) => {
+    if (isQueueOwnerStartupFailureMessage(message)) {
+      startupFailure = new Error(message.message);
+    }
+  });
+  child.on("error", (error) => {
+    startupFailure = error;
+  });
+  child.on("exit", (code, signal) => {
+    startupFailure ??= queueOwnerExitFailure(code, signal);
+  });
   child.unref();
+  child.channel?.unref();
+
+  let released = false;
+  return {
+    failure: () => startupFailure,
+    release: () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      if (child.connected) {
+        child.disconnect();
+      }
+    },
+  };
 }
